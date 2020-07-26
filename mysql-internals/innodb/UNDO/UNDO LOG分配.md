@@ -4,20 +4,17 @@
 
 #### 分配undo回滚段
 
-根据我们之前UNDO LOG物理格式章节的描述，每个独立的UNDO表空间存在若干个(默认128)个回滚段，而每个回滚段又默认存在1024个UNDO LOG SLOT，分配undo log其实质便是在所有UNDO表空间中找到一个空闲的UNDO LOG SLOT。
+每个独立UNDO表空间存在若干个(默认128)个回滚段，而每个回滚段又默认存在1024个UNDO LOG SLOT，分配undo log其实质便是在所有UNDO表空间中找到一个空闲的UNDO LOG SLOT。
 
 分配回滚段的工作在函数*trx_assign_rseg_durable*进行，分配策略是采用round-robin方式。
 
 ```c++
-static void trx_start_low(trx_t *trx, bool read_write)
+void trx_start_low(trx_t *trx, bool read_write)
 {
-  ...
   trx->state = TRX_STATE_ACTIVE;
   if (!trx->read_only && (read_write || trx->ddl_operation)) {
     trx_assign_rseg_durable(trx);
-    ...
   }
-  ...
 }
 
 void trx_assign_rseg_durable(trx_t *trx) {
@@ -36,21 +33,15 @@ trx_rseg_t *get_next_redo_rseg() {
   }
 }
 
-trx_rseg_t *get_next_redo_rseg_from_undo_spaces(
-    ulong target_undo_tablespaces)
+trx_rseg_t *get_next_redo_rseg_from_undo_spaces(...)
 {
-  undo::Tablespace *undo_space;
   ulong target_rollback_segments = srv_rollback_segments;
-
   static ulint rseg_counter = 0;
-  trx_rseg_t *rseg = nullptr;
   ulint current = rseg_counter;
   // rseg_counter表示下一次要分配的回滚段编号
   // 然后根据该编号来计算space id和segment id
   os_atomic_increment_ulint(&rseg_counter, 1);
   while (rseg == nullptr) {
-    /* Traverse the rsegs like this: (space, rseg_id)
-    (0,0), (1,0), ... (n,0), (0,1), (1,1), ... (n,1), ... */
     ulint window =
         current % (target_rollback_segments * target_undo_tablespaces);
     ulint spaces_slot = window % target_undo_tablespaces;
@@ -60,11 +51,8 @@ trx_rseg_t *get_next_redo_rseg_from_undo_spaces(
 
     undo_space = undo::spaces->at(spaces_slot);
 
-    undo_space->rsegs()->s_lock();
-
     rseg = undo_space->rsegs()->at(rseg_slot);
     rseg->trx_ref_count++;
-    undo_space->rsegs()->s_unlock();
   }
   return (rseg);
 }
@@ -84,30 +72,16 @@ dberr_t trx_undo_assign_undo(
     trx_undo_ptr_t *undo_ptr, 
     ulint type)      
 {
-  trx_rseg_t *rseg;
-  trx_undo_t *undo;
-  mtr_t mtr;
-  dberr_t err = DB_SUCCESS;
-
   // 分配的回滚段
   rseg = undo_ptr->rseg;
-
-  mtr_start(&mtr);
-  if (&trx->rsegs.m_noredo == undo_ptr) {
-    mtr.set_log_mode(MTR_LOG_NO_REDO);
-  } else {
-    ut_ad(&trx->rsegs.m_redo == undo_ptr);
-  }
-
-  mutex_enter(&rseg->mutex);
 
   // 首先尝试从回滚段缓存中分配
   undo = trx_undo_reuse_cached(trx, rseg, type, trx->id, trx->xid, &mtr);
   if (undo == NULL) {
     err = trx_undo_create(trx, rseg, type, trx->id, trx->xid, &undo, &mtr);
-    ...
   }
 
+  // 加分配的回滚段根据其类型(insert/update)加入至特定链表
   if (type == TRX_UNDO_INSERT) {
     UT_LIST_ADD_FIRST(rseg->insert_undo_list, undo);
     // 该事务后续所有的insert涉及的undo log都会使用这个
@@ -117,8 +91,6 @@ dberr_t trx_undo_assign_undo(
     // 该事务后续所有的update涉及的undo log都会使用这个
     undo_ptr->update_undo = undo;
   }
-  ...
-  return (err);
 }
 ```
 
@@ -141,6 +113,9 @@ trx_undo_t *trx_undo_reuse_cached(...)
     offset = trx_undo_insert_header_reuse(undo_page, trx_id, mtr);
     trx_undo_header_add_space_for_xid(undo_page, undo_page + offset, mtr);
   } else {
+    // 被cache的update undo log,其内容可能尚未被purge
+    // 因而我们不能直接复用,需要在其后创建一个新的update undo log
+		// 这也导致了一个undo page中存在多个update undo log情况
     offset = trx_undo_header_create(undo_page, trx_id, mtr);
     trx_undo_header_add_space_for_xid(undo_page, undo_page + offset, mtr);
   }
@@ -153,6 +128,8 @@ trx_undo_t *trx_undo_reuse_cached(...)
 ‌使用cache是为了提升undo log的分配效率。一个undo log在使用完成变得不再有效后便会被释放，一旦满足某些条件，它会被加入到回滚段的undo cache链表，insert 和update undo log有自己独立的链表。
 
 从cache分配就很简单了，只需要从相应类型的缓存链表中取出第一项，然后初始化这个被复用的undo log即可。这里的逻辑比较简单，就不再赘述了。感兴趣的读者请自行研究。
+
+如果undo log类型是update，这时候还要创建一个新的undo log header，而不能复用之前undo log。这是因为：这个被缓存的update undo log可能还在history list中尚未被purge。因而，我们只能在原来的undo page中创建一个新的undo log header，这就导致了每个update undo log page上可能会存在多个undo log，与我之前想象的有所不同。
 
 **创建新的undo log**
 
@@ -184,9 +161,7 @@ dberr_t trx_undo_create(...)
 
 ‌第1个undo page中存储的是元信息： 首先存储的是undo page的元信息，位于TRX_UNDO_PAGE_HDR到TRX_UNDO_SEG_HDR之间。
 
-‌因此，如果理解了undo log的物理格式，上面的过程就非常简单了，这里不作过多描述。
-
-‌
+‌因此，如果理解了undo log的物理格式，上面的过程就非常简单了，这里不作过多描述。‌
 
 #### UNDO LOG空间不足时如何处理
 
@@ -228,14 +203,11 @@ dberr_t trx_undo_report_row_operation(...)
     // 走到这里意味着空间不足,我们需要扩充一个新page
     // 然后尝试用这个新page继续写入
     // 调用函数trx_undo_add_page
-    mutex_enter(&undo_ptr->rseg->mutex);
     undo_block = trx_undo_add_page(trx, undo, undo_ptr, &mtr);
-    mutex_exit(&undo_ptr->rseg->mutex);
     page_no = undo->last_page_no;
   } while (undo_block != NULL);
   ...
 }
-
 
 buf_block_t *trx_undo_add_page(...)
 {

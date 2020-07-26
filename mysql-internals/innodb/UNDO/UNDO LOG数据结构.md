@@ -76,10 +76,8 @@ struct trx_t {
 
 有几个问题：
 
-- 为什么要将insert和update undo分开保存，有什么区别？
+- 为什么要将insert和update undo分开保存，有什么区别？是因为insert和update undo log的回收机制有所不同，后续文章会详细描述。
 - 每个事务trx_t和trx_undo_t之间是一一对应关系，但每个事务内可能会更改多个行记录，每次更改完后，trx_t的trx_undo_t对象不会被释放，下一次插入或者更新还是继续使用该trx_undo_t对象，而且会继续复用该trx_undo_t上的page，如果该page内空间不足，还会分配新的空间来继续保存新内容。因此trx_t和trx_undo_t确实是一一对应关系，可参考函数*trx_undo_report_row_operation*。
-
-‌
 
 **trx_undo_t**
 

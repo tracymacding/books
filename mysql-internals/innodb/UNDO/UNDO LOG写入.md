@@ -1,6 +1,6 @@
 ### UNDO LOG写入
 
-我们在之前的章节中提到，UNDO LOG分为INSERT和UPDATE两种类型。接下来我们分别描述这两种记录如何写入UNDO LOG。
+我们在之前的章节中提到，UNDO LOG分为INSERT和UPDATE两种类型。接下来我们分别描述这两种记录如何写入UNDO LOG RECORD。
 
 行记录在插入或者更新时，除写入索引记录外，还会同时写入UNDO LOG。对于新插入的行记录，会将新插入的行记录写入UNDO LOG，而对于被更新的行记录，则是将更新前的记录旧值写入UNDO LOG，并在新记录的隐藏字段rollptr中记录该UNDO LOG位置信息。
 
@@ -26,12 +26,11 @@ db_err_t btr_cur_ins_lock_and_undo(...)
 // 最终走到这里
 ulint trx_undo_page_report_insert(...)
 {
-  // 找到该undo page内下一个空闲位置
-  first_free =
-      mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE);
+  // 找到该undo page下一个空闲位置
+  first_free = mach_read_from_2(undo_page + TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_FREE);
   ptr = undo_page + first_free;
 
-  /* Reserve 2 bytes for the pointer to the next undo log record */
+  // 预留的2字节用于记录下一个undo log record位置
   ptr += 2;
 
   *ptr++ = TRX_UNDO_INSERT_REC;
@@ -50,9 +49,9 @@ ulint trx_undo_page_report_insert(...)
 }
 ```
 
-‌对于insert 操作，将新记录写入至undo log。注意，写入的只是聚簇索引包含的column。例如，创建的表结构如下：
+‌对于insert 操作，会将新记录写入至undo log。写入的只是聚簇索引包含的column。例如，创建的表结构如下：
 
-```
+```sql
 create table t(id1 int, id2 int, value int, primary key (id1, id2));
 insert into t values(1, 2, 3);
 ```
@@ -61,7 +60,7 @@ insert into t values(1, 2, 3);
 
 #### UPDATE记录
 
-更新一个已存在记录时，会将该记录的老版本（即修改前版本）记录在UNDO LOG。与INSERT操作类似：只记录其聚簇索引中包含的column的值。记完UNDO LOG后，再将数据页中的记录更新为新值，同时将UNDO LOG位置记录在更新后行记录的rollptr字段，形成一个历史更新链。
+更新一个已存在记录时，会将该记录的老版本（即修改前版本）记录在UNDO LOG。与INSERT操作类似：只记录其聚簇索引中包含的column的值以及更新涉及的column值。记完UNDO LOG后，再将数据页中的记录更新为新值，同时将UNDO LOG位置记录在更新后行记录的rollptr字段，形成一个历史更新链。
 
 ```c++
 dberr_t
@@ -86,7 +85,6 @@ btr_cur_upd_lock_and_undo(...)
 
 dberr_t trx_undo_report_row_operation(...)
 {
-  ...
   do {
     undo_page = buf_block_get_frame(undo_block);
     switch (op_type) {
@@ -148,9 +146,7 @@ trx_undo_page_report_modify(...)
     // ----------        ----------        ----------        ----------       -----------
     // 更新前的row rec中记录的rollptr指向UNDO-3
     // 因此UNDO-4中记录的内容是row rec，且其rollptr指向UNDO-3
-    field = rec_get_nth_field(rec, offsets,
-                  dict_index_get_sys_col_pos(
-                      index, DATA_TRX_ID), &flen);
+    field = rec_get_nth_field(rec, offsets, dict_index_get_sys_col_pos(index, DATA_TRX_ID), &flen);
 
     trx_id = trx_read_trx_id(field);
     ptr += mach_ull_write_compressed(ptr, trx_id);
@@ -190,31 +186,86 @@ trx_undo_page_report_modify(...)
             }
         }
     }
+}
+```
 
+#### 删除记录
+
+在innodb中，删除一个行记录实现上是标记删除，即不立即从物理页面中删除该记录(因为该记录很有可能还被其他事务所访问)，只是将该行记录标记为删除，并记录UNDO LOG，以后在回收UNDO LOG时判断该行记录不再被访问时再清理该行记录。
+
+```c++
+dberr_t btr_cur_del_mark_set_clust_rec(...)
+{
+  ...
+  // 为标记删除记录undo log
+  // 注意倒数第五个参数为nullptr,代表的是删除
+  err =
+      trx_undo_report_row_operation(flags, TRX_UNDO_MODIFY_OP, thr, index,
+                                    entry, nullptr, 0, rec, offsets, &roll_ptr);
+
+  // 更新记录的trx_id和rollptr列
+  row_upd_rec_sys_fields(rec, page_zip, index, offsets, trx, roll_ptr);
+
+  return (err);
+}
+
+// 在记录删除时传入的update为nullptr
+ulint
+trx_undo_page_report_modify(ulint flags,                
+    ulint op_type,              
+    que_thr_t *thr,
+    dict_index_t *index,
+    const dtuple_t *clust_entry,
+    const upd_t *update,
+    const rec_t *rec,
+    const ulint *offsets,
+    roll_ptr_t *roll_ptr)
+{
+    // 需要注意这玩意儿：如果update为null时,undo log record中的type会被设置为
+    // TRX_UNDO_DEL_MARK_REC
+    // 那什么时候update会为null呢?
+    // 跟踪了一下发现可能有以下两种场景:
+    // 1. btr_cur_ins_lock_and_undo:即插入一条新记录
+    // 2. btr_cur_del_mark_set_clust_rec: 从聚簇索引中删除一条老记录
+    // 不过对于1是insert场景,最终会走trx_undo_page_report_insert()
+  	// 而2可能会发生在两种场景下:
+    // 1. 更新一个已有主键值的主键:此时会先插入新的主键，再将老的主键值标记删除
+    // 2. 删除一个已有主键值
+    if (!update) {
+        // 对已有记录标记删除
+        type_cmpl = TRX_UNDO_DEL_MARK_REC;
+    } else if (rec_get_deleted_flag(rec, dict_table_is_comp(table))) {
+        // 更新删除记录,什么时候会这样呢?
+        type_cmpl = TRX_UNDO_UPD_DEL_REC;
+    } else {
+        // 更新一个已存在的记录
+        type_cmpl = TRX_UNDO_UPD_EXIST_REC;
+    }
+  	...
+    // 获得老记录的trx id和roll ptr值
+    // 并将其记录在该UNDO LOG的rollptr和trx_id字段
+  	// 这个与上面的update记录流程一致,不再重复介绍
+
+    // 记录聚簇索引包含的column的旧值,如果是联合索引,那么可能会包含多个column
+   	// 这个也与上面的update记录流程一致,不再重复介绍
+  	...
     // 如果是删除,那要将所有的column都记录在undo log中
     if (!update || !(cmpl_info & UPD_NODE_NO_ORD_CHANGE)) {
-        byte*   old_ptr = ptr;
+        ...
         trx->update_undo->del_marks = TRUE;
         ptr += 2;
         for (col_no = 0; col_no < dict_table_get_n_cols(table); col_no++)
         {
-            const dict_col_t*   col
-                = dict_table_get_nth_col(table, col_no);
-            // 这个意味着什么呢?
-            if (col->ord_part) {
-                // 记录column的field no
-                pos = dict_index_get_nth_col_pos(index, col_no);
-                ptr += mach_write_compressed(ptr, pos);
-                // 存储column的旧值
-                field = rec_get_nth_field(rec, offsets, pos, &flen);
-                ptr += mach_write_compressed(ptr, flen);
-                if (flen != UNIV_SQL_NULL) {
-                    ut_memcpy(ptr, field, flen);
-                    ptr += flen;
-                }
-            }
+          ...
         }
         mach_write_to_2(old_ptr, ptr - old_ptr);
     }
 }
 ```
+
+删除记录的内部实现其实也比较简单：
+
+1. 将行记录设置标记删除
+2. 记录UNDO LOG RECORD，需要搞清楚里面到底记录了哪些内容
+3. 最后，更新原纪录的系统列：trx_id和rollptr
+

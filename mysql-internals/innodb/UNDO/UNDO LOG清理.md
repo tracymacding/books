@@ -1,7 +1,5 @@
 ### UNDO LOG清理
 
-
-
 #### 带着问题去思考
 
 - 清理的粒度是什么？（undo log record）
@@ -11,8 +9,6 @@
 - 如何回收被清理完的UNDO LOG所占用的磁盘空间？
 
 而下面的文章内容主要就是描述这些问题在INNODB中的具体实现。
-
-‌
 
 #### 数据结构
 
@@ -43,51 +39,44 @@ struct trx_purge_t {
 };
 ```
 
-- *purge_queue*：维护了一个最小堆，每次pop最顶元素，可以得到trx_no最小的回滚段(*TrxUndoRsegsIterator::set_next*)。每个回滚段第1次事务提交时向最小堆插入数据 (见函数*trx_serialisation_number_get*)。后面每次处理完1个rseg后，会把下一个undo记录的trx_no压入到这个最小堆（*trx_purge_rseg_get_next_history_log*），作为rseg的cursor。
-- *hdr_page_no*：
-- hdr_offset：
-- space_id：
-- page_no：记录上一次搜寻结束时的undo log record所在的page no
-- offset：记录上一次搜寻结束时的undo log record所在的page内的offset
-- rseg：记录下一次搜寻的回滚段
-- next_stored：为false代表当前的回滚段已经无效（即没有undo log record可以purge），在*trx_purge_fetch_next_rec*中，会判断该值，如果为false，会调用*trx_purge_choose_next_log*来选择下一个回滚段，调用函数*purge_sys->rseg_iter->set_next()*。该值在函数*trx_purge_rseg_get_next_history_log*一进来的时候就被设置为FALSE，又在函数*trx_purge_read_undo_rec*中被设置为TRUE
+一些关键成员的说明：
 
-‌
+> * purge_queue：维护了一个最小堆，每次pop最顶元素，可以得到trx_no最小的回滚段(*TrxUndoRsegsIterator::set_next*)。每个回滚段第1次事务提交时向最小堆插入数据 (见函数*trx_serialisation_number_get*)。后面每次处理完1个rseg后，会把下一个undo记录的trx_no压入到这个最小堆（*trx_purge_rseg_get_next_history_log*），作为rseg的cursor。
+> * hdr_page_no：
+> * hdr_offset：
+> * space_id：
+> * page_no：记录上一次搜寻结束时的undo log record所在的page no
+> * offset：记录上一次搜寻结束时的undo log record所在的page内的offset
+> * rseg：记录下一次搜寻的回滚段
+> * next_stored：为false代表当前的回滚段已经无效（即没有undo log record可以purge），在*trx_purge_fetch_next_rec*中，会判断该值，如果为false，会调用*trx_purge_choose_next_log*来选择下一个回滚段，调用函数*purge_sys->rseg_iter->set_next()*。该值在函数*trx_purge_rseg_get_next_history_log*一进来的时候就被设置为FALSE，又在函数*trx_purge_read_undo_rec*中被设置为TRUE
 
-**TrxUndoRsegsIterator**
+‌**TrxUndoRsegsIterator**
 
 ```c++
 /** Choose the rollback segment with the smallest trx_no. */
 struct TrxUndoRsegsIterator {
-  TrxUndoRsegsIterator(trx_purge_t *purge_sys);
   const page_size_t set_next();
-
  private:
   trx_purge_t *m_purge_sys;
 
   TrxUndoRsegs m_trx_undo_rsegs;
   Rseg_Iterator m_iter;
-  static const TrxUndoRsegs NullElement;
 };
 ```
 
 ‌该对象是一个辅助结构，用来选择具有最小*trx_no*的回滚段的UNDO LOG。
 
-
-
 **trx_no和trx_id**‌
 
 trx_id为事务生成时的id
 
-trx_no为事务提交时的id，通过trx_no维护了事务的提交序。事务commit时按照trx_no顺序，把事务当前的undo log挂到回滚段的undo history list的表头，指向事务最近的undo log。
-
-‌
+trx_no为事务提交时的id，通过trx_no维护了事务的提交序。事务commit时按照trx_no顺序，把事务当前的undo log挂到回滚段的undo history list的表头，指向事务最近的undo log。‌
 
 #### 事务提交时对UNDO LOG处理
 
 **回收INSERT UNDO**‌
 
-insert undo日志直到事务释放记录锁、从读写事务链表清除、以及关闭read view后才开始清理，调用函数*trx_undo_insert_cleanup*：
+insert undo log直到事务释放记录锁、从读写事务链表清除、以及关闭read view后才开始清理，调用函数*trx_undo_insert_cleanup*：
 
 ```c++
 // 事务结束时会尝试设置trx_undo_t的状态:
@@ -96,53 +85,43 @@ insert undo日志直到事务释放记录锁、从读写事务链表清除、以
 //  如果只占用一个page且page利用率小于3/4设置为TRX_UNDO_CACHED
 //  否则,设置为TRX_UNDO_TO_FREE
 // 如果是UPDATE UNDO，设置为TRX_UNDO_TO_PURGE
-page_t *trx_undo_set_state_at_finish(
-    trx_undo_t *undo, 
-    mtr_t *mtr)
+page_t *trx_undo_set_state_at_finish(...)
 {
-  undo_page = trx_undo_page_get(page_id_t(undo->space, undo->hdr_page_no),
-                                undo->page_size, mtr);
-
-  seg_hdr = undo_page + TRX_UNDO_SEG_HDR;
-  page_hdr = undo_page + TRX_UNDO_PAGE_HDR;
-
+  ...
   if (undo->size == 1 && mach_read_from_2(page_hdr + TRX_UNDO_PAGE_FREE) <
-                             TRX_UNDO_PAGE_REUSE_LIMIT) {
+                         TRX_UNDO_PAGE_REUSE_LIMIT) {
     state = TRX_UNDO_CACHED;
   } else if (undo->type == TRX_UNDO_INSERT) {
     state = TRX_UNDO_TO_FREE;
   } else {
     state = TRX_UNDO_TO_PURGE;
   }
-  undo->state = state;
-  mlog_write_ulint(seg_hdr + TRX_UNDO_STATE, state, MLOG_2BYTES, mtr);
-
-  return (undo_page);
+  ...
 }
 
-void trx_undo_insert_cleanup(trx_undo_ptr_t *undo_ptr, bool noredo) {
-  trx_undo_t *undo = undo_ptr->insert_undo;
-  trx_rseg_t *rseg = undo_ptr->rseg;
-  mutex_enter(&(rseg->mutex));
+// 事务提交时清理insert undo log
+void trx_commit_in_memory(...) 
+{
+  if (trx->rsegs.m_redo.insert_undo != nullptr) {
+    trx_undo_insert_cleanup(&trx->rsegs.m_redo, false);
+  }
+}
 
+void trx_undo_insert_cleanup(...) {
   // 从回滚段对象的insert undo 链表中摘除
   UT_LIST_REMOVE(rseg->insert_undo_list, undo);
-  undo_ptr->insert_undo = NULL;
 
   // 如果状态是TRX_UNDO_CACHED，加入到回滚段的insert undo cache链表,以备复用
-  // undo->state在上面的trx_undo_set_state_at_finish中被设置
+  // undo->state在上面的trx_undo_set_state_at_finish()中被设置
   if (undo->state == TRX_UNDO_CACHED) {
     UT_LIST_ADD_FIRST(rseg->insert_undo_cached, undo);
   } else {
-    mutex_exit(&(rseg->mutex));
-    // 释放undo log占用的空间
+    // 如果不能复用,则直接释放insert undo log占用的空间
     trx_undo_seg_free(undo, noredo);
-    mutex_enter(&(rseg->mutex));
     rseg->curr_size -= undo->size;
     // 释放undo log的内存对象
     trx_undo_mem_free(undo);
   }
-  mutex_exit(&(rseg->mutex));
 }
 ```
 
@@ -151,18 +130,13 @@ void trx_undo_insert_cleanup(trx_undo_ptr_t *undo_ptr, bool noredo) {
 3. 否则，将该undo所占的segment及其所占用的回滚段的slot全部释放掉（*trx_undo_seg_free*），修改当前回滚段的大小(*rseg->curr_size*)，并释放undo对象分配的内存（*trx_undo_mem_free*），与update_undo不同，insert_undo不会放到History list上
 4. 事务完成提交后，需要将其使用的回滚段引用计数rseg->trx_ref_count减1。
 
-‌
-
 **回收UPDATE UNDO**
 
-如果当前事务包含update undo，并且undo所在回滚段不在purge队列时，还需要将当前undo所在的回滚段（及当前最大的事务号）加入Purge线程的Purge队列（purge_sys->purge_queue）中（参考函数`trx_serialisation_number_get`）。
+如果当前事务包含update undo，还需要将当前undo所在的回滚段（及当前最大的事务号）加入Purge队列（purge_sys->purge_queue）中。
 
 ```c++
 void trx_undo_update_cleanup(...)
 {
-  trx_rseg_t *undo = undo_ptr->update_undo;
-  trx_undo_t *rseg = undo_ptr->rseg;
-
   // 将update undo log加入到回滚段的history list中
   trx_purge_add_update_undo_to_history(
       trx, undo_ptr, undo_page, update_rseg_history_len, n_added_logs, mtr);
@@ -170,8 +144,8 @@ void trx_undo_update_cleanup(...)
   // 将update undo从回滚段的update_undo_list中摘除
   UT_LIST_REMOVE(rseg->update_undo_list, undo);
 
-  undo_ptr->update_undo = NULL;
-
+  // 在trx_undo_set_state_at_finish中设置了state
+  // update undo log也可以被cache以便复用
   if (undo->state == TRX_UNDO_CACHED) {
     UT_LIST_ADD_FIRST(rseg->update_undo_cached, undo);
   } else {
@@ -180,15 +154,11 @@ void trx_undo_update_cleanup(...)
 }
 
 // 将update undo log加入到回滚段的TRX_RSEG_HISTORY_SIZE链表头部
-// 保证该链表是按照事务提交顺序反向排列
+// 保证该链表是按照事务提交顺序逆向排列
 void trx_purge_add_update_undo_to_history(...)
 {
-  undo = undo_ptr->update_undo;
-  rseg = undo->rseg;
-
   rseg_header = trx_rsegf_get(undo->rseg->space_id, undo->rseg->page_no,
                               undo->rseg->page_size, mtr);
-
   undo_header = undo_page + undo->hdr_offset;
 
   if (undo->state != TRX_UNDO_CACHED) {
@@ -221,35 +191,30 @@ void trx_purge_add_update_undo_to_history(...)
 }
 ```
 
-‌对于update undo不能像insert undo一样在事务结束后直接释放，因为update undo log中记录了行记录的老版本，这些老版本在事务结束后可能仍然被其他事务所访问，只能等到不可能再被访问时才可以释放。对于这类undo log的清理：
+‌update undo不能像insert undo一样在事务结束后直接释放，因为其中包含的老版本数据，在本事务结束后可能仍然被其他事务所访问，只能等到不可能再被访问时才可以释放。对于这类undo log的清理：
 
 1. 将undo log加入到history list上，调用*trx_purge_add_update_undo_to_history*：
-   - 如果该undo log不满足cache的条件（状态为TRX_UNDO_CACHED，如上述），则将其占用的slot设置为FIL_NULL，意为slot空闲，同时更新回滚段头的TRX_RSEG_HISTORY_SIZE值，将当前undo占用的page数累加上去；
-   - 将当前undo加入到回滚段的TRX_RSEG_HISTORY链表上，作为链表头节点，节点指针为UNDO头的TRX_UNDO_HISTORY_NODE；
-   - 更新*trx_sys->rseg_history_len*，如果只有普通的update_undo，则加1，如果还有临时表的update_undo，则加2，然后唤醒purge线程；
-   - 将当前事务的`trx_t::no`写入undo头的TRX_UNDO_TRX_NO段；
+   - 如果该undo log不满足可缓存的条件（状态为TRX_UNDO_CACHED，如上述），则将其占用的slot设置为FIL_NULL，意为slot空闲，同时更新回滚段头的TRX_RSEG_HISTORY_SIZE值，将当前undo占用的page数累加上去
+   - 将当前undo加入到回滚段的TRX_RSEG_HISTORY链表上，作为链表头节点，节点指针为UNDO头的TRX_UNDO_HISTORY_NODE
+   - 更新*trx_sys->rseg_history_len*，如果只有普通的update_undo，则加1，如果还有临时表的update_undo，则加2，然后唤醒purge线程
+   - 将当前事务的trx_no（事务提交number）写入undo头的TRX_UNDO_TRX_NO段；
    - 如果不是delete-mark操作，将undo头的TRX_UNDO_DEL_MARKS更新为false;
    - 如果undo所在回滚段的`rseg->last_page_no`为FIL_NULL，表示该回滚段的旧的清理已经完成，进行如下赋值，记录这个回滚段上下一个需要purge的undo记录信息：
 2. 如果undo需要cache，将undo对象放到回滚段的update_undo_cached链表上；否则释放undo对象（trx_undo_mem_free）。
 
-update产生的UNDO日志在事务结束时会放到history list中，不能直接清理的原因是这些历史版本可能还有别的事务在引用。只有当这些旧版本无人访问时，需要进行清理操作；另外页内标记删除的操作也需要从物理上清理掉。mysql中有专门的后台Purge线程负责这些工作。
-
-由于UPDATE UNDO LOG在事务结束时不能被直接释放，我们需要额外的机制来处理这些UNDO LOG。为此，INNODB引入了后台purge线程。我们在这里不讨论后台线程如何创建，我们重点关注以下几方面：
+由于UPDATE UNDO LOG在事务结束时不能被直接释放，我们需要额外的机制来处理这些UNDO LOG。为此，INNODB引入了后台purge线程。我们重点关注以下几个问题：
 
 - 如何收集需要被purge的undo log？
 - 如何清理UNDO LOG以及其相关的索引记录？
 - 如何释放UNDO LOG占用的物理文件空间？
 
-#### 收集需要purge的undo log record
+#### 收集需要被清理的undo log record
 
-首先，需要说明的是：每个UNDO LOG中可能会包含很多的LOG RECORD，每个RECORD包含对行记录的一次更新（或删除）。purge也是按照UNDO LOG RECORD为单位来进行。因而，接下来我们会看到，这里的收集也是针对一个个的LOG RECORD。
+每个UNDO LOG中可能会包含多个RECORD，每个RECORD包含对行记录的一次更新。purge也是按照UNDO LOG RECORD为单位来进行。
 
-```
-ulint trx_purge(ulint n_purge_threads, 
-                ulint batch_size,
-                bool truncate)
+```c++
+ulint trx_purge(...)
 {
-  ...
   // 首先, 保存一份当前最老的ReadView
   // 接下来判断UNDO LOG是否可以被purge还得靠它
   trx_sys->mvcc->clone_oldest_view(&purge_sys->view);
@@ -257,12 +222,10 @@ ulint trx_purge(ulint n_purge_threads,
   // batch_size限定了每轮purge可以处理的最大undo page数(每个page内可以存储一个或者多个log record)
   n_pages_handled =
       trx_purge_attach_undo_recs(n_purge_threads, purge_sys, batch_size);
-  ...
 }
 
 ulint trx_purge_attach_undo_recs(...) 
 {
-  ...
   for (ulint i = 0; n_pages_handled < batch_size; ++i) {
     purge_node_t::rec_t rec;
     // 获取下一个要被purge的undo log record
@@ -277,26 +240,23 @@ ulint trx_purge_attach_undo_recs(...)
 }
 ```
 
-‌函数*trx_purge_attach_undo_recs*很啰嗦地写了一堆，目的只有一个：扫描回滚段的所有undo log record，将可以被purge的undo log record收集起来，保存在一个专门对象内。
+‌函数*trx_purge_attach_undo_recs*啰嗦地写了一堆，目的只有一个：扫描所有undo log record，将可以被清理的undo log record收集起来，保存在一个专门对象内。
 
 ‌这里很多的代码是为了一个优化：将本批次内所有属于同一个table的undo log record保存在一起，然后交由同一个purge线程处理，这样可以减少多线程并发加锁导致的锁争抢。
 
-‌这段代码的关键在于如何扫描可以被purge的undo log record。接下来我们看看如何来扫描回滚段来找到需要被purge的undo log record，这里需要解决以下几个问题：
+‌这段代码的关键在于如何扫描可以被清理的的undo log record。这里需要解决以下几个问题：
 
 1. 从哪个回滚段开始扫描？是每次无脑从第一个回滚段还是从上次扫描结束位置继续扫描？
-2. 如何判定一个undo log record可以被purge？
-
-‌
+2. 如何判定一个undo log record可以被purge？‌
 
 带着以上几个问题我们来翻阅代码：
 
-```
+```c++
 trx_undo_rec_t *trx_purge_fetch_next_rec(...)
 {
   // 如果超过了purge_sys->view的最小trx_id
   // 那说明该undo log中的记录可能还被当前活跃事务引用
-  // 还不能做purge,调用者在也会判断返回值,如果为null
-  // 那么就跳出本轮扫描
+  // 还不能做purge,调用者在也会判断返回值,如果为null,那么就跳出本轮扫描
   // 因为每次选择的undo log一定是当前拥有最小trx_no的
   // 所以只要它超过了purge_sys->view,那么其他的已提交事务的undo也一定超过
   // 因而没有必要再扫描其他的了
@@ -321,10 +281,6 @@ trx_undo_rec_t *trx_purge_get_next_rec(...)
 
   // 首先从上次搜寻结束处的page继续寻找下一个可回收的undo log record
   for (;;) {
-    ulint type;
-    trx_undo_rec_t *next_rec;
-    ulint cmpl_info;
-
     next_rec = trx_undo_page_get_next_rec(rec2, purge_sys->hdr_page_no,
                                           purge_sys->hdr_offset);
     // 如果该page内没有undo log record了,就开始从该undo log的下一个page继续寻找
@@ -336,13 +292,10 @@ trx_undo_rec_t *trx_purge_get_next_rec(...)
       break;
     }
     rec2 = next_rec;
-
     type = trx_undo_rec_get_type(rec2);
-
     if (type == TRX_UNDO_DEL_MARK_REC) {
       break;
     }
-    ...
   }
 
   // 如果一个undo log内的所有undo page都遍历完了还无法找到可purge的undo log record
@@ -350,7 +303,6 @@ trx_undo_rec_t *trx_purge_get_next_rec(...)
   // 因为回滚段内已经释放的undo log都被串联成为一个history list
   // 而每个undo log中都记录了自己的前后项信息,所以这种查询是很快的
   if (rec2 == NULL) {
-    mtr_commit(&mtr);
     // 注意: 当前回滚段(purge_sys->rseg)内的undo log history list可能为空
     // trx_purge_rseg_get_next_history_log内获取下一个undo log, 更新该回滚段的
     // trx_no, 再将其插入至purge_sys->purge_queue中
@@ -359,7 +311,6 @@ trx_undo_rec_t *trx_purge_get_next_rec(...)
     trx_purge_rseg_get_next_history_log(purge_sys->rseg, n_pages_handled);
     // 选择下一个undo log处理,该undo log一定拥有最小的trx_no
     trx_purge_choose_next_log();
-    mtr_start(&mtr);
     undo_page =
         trx_undo_page_get_s_latched(page_id_t(space, page_no), page_size, &mtr);
     rec = undo_page + offset;
@@ -381,15 +332,13 @@ trx_undo_rec_t *trx_purge_get_next_rec(...)
 }
 ```
 
-*trx_purge_get_next_rec*的算法思想：
+*trx_purge_get_next_rec*的算法也比较简单：
 
-1. 首先从上次搜寻结束位置处开始向后寻找下一个可purge的undo log record，该位置被记录在purge_sys->page_no和purge_sys->offset中；
+1. 首先从上次搜寻结束位置处开始向后寻找下一个可清理的undo log record，该位置被记录在purge_sys->page_no和purge_sys->offset中；
 2. 如果1中的undo page中找不到undo log record，那么会继续查找该undo log中的下一个undo page，因为一个undo log内的所有undo page通过链表串联，因此这种查找很容易，见*trx_undo_get_next_rec*
-3. 如果2还是找不到，说明某个undo log的所有record都扫描完毕，接下来要选择下一个扫描的undo log。这里选择有一个原则：选择剩余undo log中trx_no最小的。为此，*purge_sys->purge_queue*被构建为一个小根堆：每个回滚段第1次事务提交时向最小堆插入数据 (见函数*trx_serialisation_number_get*)。后面每次处理完回滚段的undo log后，会把其下一个undo log的trx_no压入到这个最小堆（*trx_purge_rseg_get_next_history_log*）。然后，purge系统在选择下一个undo log就很容易了：只要选择堆顶的那个回滚段的undo log即可。
+3. 如果2还是找不到，说明当前undo log所有record都扫描完毕，接下来要选择下一个扫描的undo log。原则是：选择剩余undo log中trx_no最小的。为此，*purge_sys->purge_queue*被构建为一个小根堆：每个回滚段第1次事务提交时向最小堆插入数据 (见函数*trx_serialisation_number_get*)。后面每次处理完回滚段的undo log后，会把其下一个undo log的trx_no压入到这个最小堆（*trx_purge_rseg_get_next_history_log*）。然后，清理系统在选择下一个undo log就很容易了：只要选择堆顶的那个回滚段的undo log即可。
 
-‌
-
-我们研究下*trx_purge_rseg_get_next_history_log*的实现：
+看看*trx_purge_rseg_get_next_history_log*的实现：
 
 ```c++
 // 从回滚段rseg中找到下一个需要被purge的undo log
@@ -413,19 +362,18 @@ void trx_purge_rseg_get_next_history_log(
   log_hdr = undo_page + rseg->last_offset;
 
   // 找到当前undo log的在回滚段history链表上的前一个undo log
+  // 因为回滚段的history链表上的事务是按照事务提交逆向排序
+  // 因而找undo log的前向记录即可
   prev_log_addr = trx_purge_get_log_from_hist(
       flst_get_prev_addr(log_hdr + TRX_UNDO_HISTORY_NODE, &mtr));
 
   // 如果没有,直接返回
   if (prev_log_addr.page == FIL_NULL) {
-    rseg->last_page_no = FIL_NULL;
-    mtr_commit(&mtr);
-    rseg->unlatch();
+    ...
     return;
   }
 
-  log_hdr =
-      trx_undo_page_get_s_latched(page_id_t(rseg->space_id, prev_log_addr.page),
+  log_hdr = trx_undo_page_get_s_latched(page_id_t(rseg->space_id, prev_log_addr.page),
                                   rseg->page_size, &mtr) + prev_log_addr.boffset;
   trx_no = mach_read_from_8(log_hdr + TRX_UNDO_TRX_NO);
   del_marks = mach_read_from_2(log_hdr + TRX_UNDO_DEL_MARKS);
@@ -458,7 +406,7 @@ void trx_purge_choose_next_log(void) {
 }
 ```
 
-‌至此，我们就搞清楚了purge系统如何收集待清理的undo log record。接下来我们来关注如何清理单个undo log record。
+‌至此，我们就搞清楚了purge系统如何收集待清理的undo log record。接下来研究如何清理undo log record。
 
 **UNDO LOG RECORD清理**
 
@@ -478,9 +426,7 @@ que_thr_t *row_purge_step(que_thr_t *thr) {
 void row_purge(...)
 {
   while (row_purge_parse_undo_rec(node, undo_rec, &updated_extern, thd, thr)) {
-    bool purged;
-
-    purged = row_purge_record(node, undo_rec, thr, updated_extern, thd);
+    bool purged = row_purge_record(node, undo_rec, thr, updated_extern, thd);
 
     if (purged || srv_shutdown_state.load() != SRV_SHUTDOWN_NONE) {
       return;
@@ -512,27 +458,41 @@ bool row_purge_record_func(...)
 }
 ```
 
-‌我们知道，在INNODB中，每个行记录的更新在实现上是先将原记录标记删除，然后再插入一条新纪录。因此，在purge undo record时其实就是将其对应的原始记录从聚簇索引中删除。
+‌清理UNDO LOG RECORD时需要判断：
 
-‌在我们前面的准备知识中了解到，对于主键或者二级索引的更新是标记删除原纪录同时插入一个新记录。而删除原纪录也会同时产生UNDO LOG（只针对聚簇索引），因而具体的purge处理是：
-
-- 如果该undo log record有TRX_UNDO_DEL_MARK_REC标记，那说明这是一个删除聚簇索引的操作产生的undo log record，这时候purge需要做的是删除这个聚簇索引记录。而从以前的知识我们知道，这一般会在删除聚簇索引或者更新聚簇索引值时候产生该记录，这时候同样会在二级索引中产生一个删除记录。因此，我们除了删除聚簇索引中的记录外，还要删除二级索引中的标记删除的记录。
-- 否则，对于聚簇索引来说，这只是一个原地更新，但有可能是二级索引上产生了标记删除操作（例如只对二级索引值进行更新），这时候我们就需要根据回滚段记录去检查二级索引记录序是否发生变化，并执行清理操作（*row_purge_upd_exist_or_extern*）
+- 如果该log record有TRX_UNDO_DEL_MARK_REC标记，那说明这是一个删除操作产生的undo log record。这时候清理需要做的是删除这个聚簇索引记录。而从以前的知识我们知道，这一般会在删除聚簇索引或者更新聚簇索引值时候产生该记录，这时候同样会在二级索引中产生一个删除记录。因此，我们除了删除聚簇索引中的记录外，还要删除二级索引中的标记删除的记录(*row_purge_remove_sec_if_poss*)。
+- 否则，对于聚簇索引来说，这只是一个原地更新，但有可能是二级索引上产生了标记删除操作（例如针对二级索引值进行更新），这时候我们就需要根据回滚段记录去检查二级索引记录序是否发生变化，并执行清理操作（*row_purge_upd_exist_or_extern*）
 
 ‌
 
-**UNDO日志文件回收**
+#### UNDO LOG文件回收
 
-*trx_purge*在处理完一个batch（通常是300）之后，调用*trx_purge_truncate_history*。purge_sys对每一个rseg尝试释放undo log（trx_purge_truncate_rseg_history）。
+*trx_purge*在处理完一个batch（通常是300）之后，调用*trx_purge_truncate_history*。purge_sys对每一个rseg尝试释放undo log（*trx_purge_truncate_rseg_history*）。
 
 ```c++
-ulint trx_purge(...)
+ulint srv_do_purge(ulint *n_total_purged)
 {
   ...
+	ulint undo_trunc_freq = purge_sys->undo_trunc.get_rseg_truncate_frequency();
+  ulint rseg_truncate_frequency = ut_min(
+        static_cast<ulint>(srv_purge_rseg_truncate_frequency), undo_trunc_freq);
+	// 是否执行UNDO SPACE文件的截断受参数srv_purge_rseg_truncate_frequency的控制
+  // 默认每128次purge执行一次undo space文件的截断
+  n_pages_purged = trx_purge(n_use_threads, srv_purge_batch_size,
+                               (++count % rseg_truncate_frequency) == 0);
+  ...
+}
+
+ulint trx_purge(
+			ulint n_purge_threads, 
+      ulint batch_size,
+      bool truncate)
+{
+  ...
+  // 完成purge后再由参数truncate决定是否需要进行undo space的截断
   if (truncate || srv_upgrade_old_undo_found) {
     trx_purge_truncate();
   }
-  ...
 }
 
 void trx_purge_truncate() {
@@ -545,57 +505,27 @@ void trx_purge_truncate() {
 
 void trx_purge_truncate_history(...)
 {
-  ...  
   // 检查独立表空间内所有的回滚段
   // 对每个回滚段,检查其HISTORY LOG链表上的每个UNDO LOG空间是否可以被释放
   for (auto undo_space : undo::spaces->m_spaces) {
     undo::Truncate &ut = purge_sys->undo_trunc;
+    // 清理每个回滚段上的undo logs
     for (auto rseg : *undo_space->rsegs()) {
       trx_purge_truncate_rseg_history(rseg, limit);
     }
   }
     
-  // 处理系统表空间
-  for (auto rseg : trx_sys->rsegs) {
-    trx_purge_truncate_rseg_history(rseg, limit);
-  }
-
-  // 处理临时表空间
-  for (auto rseg : trx_sys->tmp_rsegs) {
-    trx_purge_truncate_rseg_history(rseg, limit);
-  }
-
+  // 处理系统表空间和临时表空间
+	...
 
   for (i = 0; i < space_count; i++) {
-    /* Check all undo spaces.  Mark the first one that needs
-    to be truncated. */
+    // 寻找可以被truncate的undo space
     if (!trx_purge_mark_undo_for_truncate()) {
-      /* If none are marked, no truncation is needed
-      at this time. */
-      ut_ad(!purge_sys->undo_trunc.is_marked());
       break;
     }
-
-    if (!trx_purge_check_if_marked_undo_is_empty(limit)) {
-      /* During slow shutdown, keep checking until
-      it is empty. */
-      if (srv_shutdown_state.load() != SRV_SHUTDOWN_NONE &&
-          srv_fast_shutdown == 0) {
-        continue;
-      }
-
-      /* During normal operation or fast shutdown,
-      there is no need to stay in this tight loop.
-      Give some time for the marked space to become
-      empty. */
-      break;
-    }
-
-    /* Truncate the marked space. */
+		...
+		// truncate undo space
     if (!trx_purge_truncate_marked_undo()) {
-      /* If the marked and empty space did not get trucated
-      due to a concurrent clone or something else,
-      try again later. */
       break;
     }
   }
@@ -607,25 +537,18 @@ void trx_purge_truncate_history(...)
 // 关键在于如何判断是否可以被清理：其实也就是看该undo log的所有record是否在前面的purge线程中被处理了
 void trx_purge_truncate_rseg_history(...)
 {
-  rseg_hdr =
-      trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, &mtr);
-
+  rseg_hdr = trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, &mtr);
   hdr_addr = trx_purge_get_log_from_hist(
       flst_get_last(rseg_hdr + TRX_RSEG_HISTORY, &mtr));
 
 loop:
   // 如果history链表为空,已经遍历完了所有已经提交事务的undo log
   if (hdr_addr.page == FIL_NULL) {
-    rseg->unlatch();
-    mtr_commit(&mtr);
     return;
   }
-
   undo_page = trx_undo_page_get(page_id_t(rseg->space_id, hdr_addr.page),
                                 rseg->page_size, &mtr);
-
   log_hdr = undo_page + hdr_addr.boffset;
-
   undo_trx_no = mach_read_from_8(log_hdr + TRX_UNDO_TRX_NO);
 
   // limit->trx_no代表什么？
@@ -645,10 +568,6 @@ loop:
       trx_undo_truncate_start(rseg, hdr_addr.page, hdr_addr.boffset,
                               limit->undo_no);
     }
-
-    rseg->unlatch();
-    mtr_commit(&mtr);
-
     return;
   }
 
@@ -659,38 +578,170 @@ loop:
 
   // 可以释放整个undo segemnt的条件：
   // 1. undo state为TRX_UNDO_TO_PURGE，这在事务提交时被设置，见trx_undo_set_state_at_finish
-  // 2.   
+  // 2. 该undo log page上没有别的undo log
   // 在这里面也会将该undo log从回滚段的TRX_RSEG_HISTORY链表中摘除
   if ((mach_read_from_2(seg_hdr + TRX_UNDO_STATE) == TRX_UNDO_TO_PURGE) &&
       (mach_read_from_2(log_hdr + TRX_UNDO_NEXT_LOG) == 0)) {
-    rseg->unlatch();
-    mtr_commit(&mtr);
     trx_purge_free_segment(rseg, hdr_addr, is_temp);
   } else {
     // 将undo log从回滚段的TRX_RSEG_HISTORY链表中摘除
-    // 一旦摘除了,以后该undo log内的
     trx_purge_remove_log_hdr(rseg_hdr, log_hdr, &mtr);
-    rseg->unlatch();
-    mtr_commit(&mtr);
   }
-
-  mtr_start(&mtr);
-
-  rseg->latch();
-
-  rseg_hdr =
-      trx_rsegf_get(rseg->space_id, rseg->page_no, rseg->page_size, &mtr);
-
   // 继续处理下一个undo log
   hdr_addr = prev_hdr_addr;
-
   goto loop;
 }
 ```
 
-‌大致过程是：把每个purge过的undo log从history list移除，如果undo segment中所有的undo log都被释放，可以尝试释放undo segment，这里隐式释放file segment到达释放存储空间的目的。
+‌大致过程是：把每个purge过的undo log从回滚段的history list移除，如果undo segment中所有的undo log都被释放，可以尝试释放undo segment，这里隐式释放file segment到达释放存储空间的目的。
 
-由于篇幅有限，这部分就不深入介绍了。
+接下来就是处理表空间truncate。这在函数*trx_purge_mark_undo_for_truncate*中进行：
+
+```c++
+bool trx_purge_mark_undo_for_truncate(size_t truncate_count) {
+  // 如果当前已经存在undo space被标记截断,那么不用继续扫描,
+  auto undo_trunc = &purge_sys->undo_trunc;
+  if (undo_trunc->is_marked()) {
+    return (true);
+  }
+
+  /* In order to implicitly select an undo space to truncate, we need
+  at least 2 active UNDO tablespaces.  As long as there is one undo
+  tablespace active the server will continue to operate. */
+  ulint num_active = 0;
+
+  // 如果某个undo space被标记为inactive,那么直接设置该space为下一个要被
+  // truncate的对象即可,然后返回
+  for (auto undo_ts : undo::spaces->m_spaces) {
+    if (undo_ts->is_inactive_explicit()) {
+      undo_trunc->mark(undo_ts);
+      undo::spaces->s_unlock();
+      return (true);
+    }
+    num_active += (undo_ts->is_active() ? 1 : 0);
+  }
+
+  // 接下来遍历所有的undo space,检查是否有undo space可以被truncate
+  undo::spaces->s_lock();
+
+  space_id_t space_num = undo_trunc->get_scan_space_num();
+  space_id_t first_space_num_scanned = space_num;
+
+  do {
+    auto undo_space = undo::spaces->find(space_num);
+    // 判断undo space是否需要截断
+    // undo表空间的文件大小，如果超过了innodb_max_undo_log_size
+    // 就会被truncate到初始大小，但有一个前提，就是表空间中的undo不再被使用
+    // 好像没有哪里判断表空间的undo不再被使用啊？？？
+    if (undo_space->needs_truncation()) {
+      undo_trunc->increment_scan();
+      undo_trunc->mark(undo_space);
+      break;
+    }
+    space_num = undo_trunc->increment_scan();
+  } while (space_num != first_space_num_scanned);
+
+  if (!undo_trunc->is_marked()) {
+    return (false);
+  }
+  return (true);
+}
+```
+
+该函数的目标是检查是否有可以进行truncate的undo 表空间，关键的数据结构是Truncate：
+
+```c++
+class Truncate {
+ public:
+  Truncate()
+      : m_space_id_marked(SPACE_UNKNOWN),
+        m_purge_rseg_truncate_frequency(
+            static_cast<ulint>(srv_purge_rseg_truncate_frequency)),
+        m_timer() {
+  }
+
+ private:
+  // 被标记为需要阶段的undo space id
+  space_id_t m_space_id_marked;
+};
+```
+
+接下来我们看看如何截断一个undo space：
+
+```c++
+bool trx_purge_truncate_marked_undo() {
+  // 获取mdl锁避免undo space被drop等
+  MDL_ticket *mdl_ticket;
+  dd_tablespace_get_mdl(space_name.c_str(), &mdl_ticket, false);
+
+  if (!trx_purge_truncate_marked_undo_low(space_num, space_name)) {
+    ...
+  }
+  // 释放MDL锁
+  dd_release_mdl(mdl_ticket);
+  return (true);
+}
+
+bool trx_purge_truncate_marked_undo_low(space_id_t space_num,
+                                        std::string space_name)
+{
+  undo::Truncate *undo_trunc = &purge_sys->undo_trunc;
+  undo::Tablespace *marked_space = undo::spaces->find(space_num);
+
+  // 记一个log
+  dberr_t err = undo::start_logging(marked_space);
+
+  bool success = trx_undo_truncate_tablespace(marked_space);
+
+  space_id_t new_space_id = marked_space->id();
+
+  // 为该space在DD中设置新的space id
+  if (DD_FAILURE == dd_tablespace_set_id_and_state(space_name.c_str(),
+                                                   new_space_id, next_state)) {
+    return (false);
+  }
+
+  return (true);
+}
+
+// 真正地truncate undo log space
+// 这里复用了原undo space的内存对象,但会为其进行重新初始化
+// 同时删除了原undo space的物理文件,创建新文件,分配新的space id
+bool trx_undo_truncate_tablespace(undo::Tablespace *marked_space)
+{
+  bool success = true;
+  auto old_space_id = marked_space->id();
+  auto space_num = undo::id2num(old_space_id);
+  auto marked_rsegs = marked_space->rsegs();
+
+  // 分配一个新的space id
+  auto new_space_id = undo::use_next_space_id(space_num);
+  const auto n_pages = SRV_UNDO_TABLESPACE_SIZE_IN_PAGES;
+
+  fil_space_t *space = fil_space_get(old_space_id);
+
+  // 删除老的undo space文件,并使用新的space id创建新的undo space文件
+  success = fil_replace_tablespace(old_space_id, new_space_id, n_pages);
+
+  fsp_header_init(new_space_id, n_pages, &mtr, false);
+
+  // 设置回滚段array成员
+  trx_rseg_array_create(new_space_id, &mtr);
+
+  // 初始化原undo space的每个内存回滚段
+  // 分配回滚段header page并初始化等
+  for (auto rseg : *marked_rsegs) {
+    rseg->space_id = new_space_id;
+    rseg->page_no = trx_rseg_header_create(new_space_id, univ_page_size,
+                                           PAGE_NO_MAX, rseg->id, &mtr);
+ 		...
+  }
+  marked_space->set_space_id(new_space_id);
+  return (success);
+}
+```
+
+
 
 #### 问题总结
 

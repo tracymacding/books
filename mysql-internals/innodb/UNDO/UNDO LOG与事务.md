@@ -8,11 +8,7 @@
 
 为了在崩溃重启时知道事务状态，需要将事务设置为Prepare，MySQL 5.7对临时表undo和普通表undo分别做了处理，前者在写undo日志时总是不需要记录redo，后者则需要记录。
 
-分别设置insert undo 和 update undo的状态为prepare，调用函数*trx_undo_set_state_at_prepare*，过程也比较简单，找到undo page的UNDO_SEG_HDR，将其中的**TRX_UNDO_STATE**设置为**TRX_UNDO_PREPARED**，同时修改其他对应字段（主要是XID），如下图所示（对于外部显式XA所产生的XID，这里不做讨论），修改字段见下图红色方框标注：
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEQrKrIHM9bMw-5fYn%2F-MCERZTxhkw2LAJuUOB7%2Fimage.png?alt=media&token=c05cca1c-a434-424b-866b-d6795fbcfb2c)
-
-
+分别设置insert undo 和 update undo的状态为prepare，调用函数*trx_undo_set_state_at_prepare*，过程也比较简单，找到undo page的UNDO_SEG_HDR，将其中的**TRX_UNDO_STATE**设置为**TRX_UNDO_PREPARED**，同时修改其他对应字段（主要是XID）。
 
 ```c++
 lsn_t trx_prepare_low(...) 
@@ -104,14 +100,15 @@ page_t *trx_undo_set_state_at_finish(trx_undo_t *undo, mtr_t *mtr)
     // 此时将该UNDO PAGE加入CACHED链表准备复用
     state = TRX_UNDO_CACHED;
   } else if (undo->type == TRX_UNDO_INSERT) {
-    // 为什么INSERT UNDO可以直接FREE
+    // INSERT UNDO可以直接FREE
     state = TRX_UNDO_TO_FREE;
   } else {
-    // 为什么UPDATE UNDO需要交由专门的purge线程来回收
+    // UPDATE UNDO需要交由专门的purge线程来回收
     state = TRX_UNDO_TO_PURGE;
   }
 
   undo->state = state;
+ 	// 更新undo log的事务状态字段
   mlog_write_ulint(seg_hdr + TRX_UNDO_STATE, state, MLOG_2BYTES, mtr);
   return (undo_page);
 }
@@ -127,7 +124,7 @@ page_t *trx_undo_set_state_at_finish(trx_undo_t *undo, mtr_t *mtr)
 
 #### 事务回滚
 
-如果事务因为异常或者被显式的回滚了，那么所有数据变更都要改回去。这里就要借助回滚日志中的数据来进行恢复了。
+如果事务因为异常或者被显式的回滚了，那么所有数据变更都要恢复修改前值。这里就要借助UNDO LOG中的数据来进行恢复了。
 
 入口函数为：`row_undo_step --> row_undo`‌
 

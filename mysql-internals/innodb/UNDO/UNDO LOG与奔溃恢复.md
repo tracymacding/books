@@ -1,12 +1,10 @@
 #### UNDO LOG与奔溃恢复
 
-当数据库因种种原因奔溃后，在重启时需要对系统奔溃时那些未竟事务进行处理：要么回滚，要么提交。保证在重
+当数据库因种种原因奔溃后，重启时需要对系统奔溃时那些未竟事务进行处理：要么回滚，要么提交，保证在重
 
 ‌启完成后系统处于一个干净的状态。而未竟事务信息的构造依赖UNDO LOG，因为纵观MYSQL，事务信息的持久
 
-‌化是通过UNDO LOG的写入和更新来进行的。
-
-因而，在数据库系统启动时，需要：‌
+‌化是通过UNDO LOG的写入和更新来进行的。因而，在数据库系统启动时，需要：‌
 
 - 收集UNDO LOG并构建事务信息
 - 对未竟事务进行处理：回滚或者提交
@@ -72,7 +70,7 @@ trx_undo_t *trx_undo_mem_create_at_db_start(...)
 {
   // 读取undo log的segment header
   // 根据header便可以恢复出undo log的很多元信息
-  // 不会读取undo log里面的每一条记录,因为没有必要
+  // 不会读取undo log里面的每一条record,因为没有必要
   undo_page = trx_undo_page_get(page_id_t(rseg->space_id, page_no),
                                 rseg->page_size, mtr);
 
@@ -145,7 +143,7 @@ void trx_resurrect(trx_rseg_t *rseg)
 }
 ```
 
-‌#### 活跃事务处理
+#### 活跃事务处理
 
 ```c++
 // 收集活跃事务和已提交事务,保存在链表中返回

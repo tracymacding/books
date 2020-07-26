@@ -186,40 +186,43 @@ dberr_t row_sel_get_clust_rec(...)
 
 ‌接下来我们举例来说明聚簇索引和辅助索引如何通过MVCC实现一致性读。
 
-‌**聚簇索引如何实现一致性读示例**
+‌**聚簇索引实现一致性读示例**
+
+```
+// 建表语句如下
+create table t1(c1 int primary key, c2 int, c3 char(10), index i_c3(c3));
+```
+
+| session 1        | session 2                             | 备注             |
+| ---------------- | ------------------------------------- | ---------------- |
+|                  | insert into t1 values(1, 1, 'a')      | TRX1: trx_id = 1 |
+| begin            |                                       |                  |
+| select * from t1 |                                       | 结果(1, 1, 'a')  |
+|                  | update t1 set c3 = 'b' where c3 = 'a' | TRX2: trx_id = 3 |
+| select * from t1 |                                       | 结果(1, 1, 'a')  |
+|                  | update t1 set c3 = 'c' where c3 = 'b' | TRX3: trx_id = 5 |
+| select * from t1 |                                       | 结果(1, 1, 'a')  |
 
 下图中记录存在三个版本，在Repeatable-Read下select * from t1 查询返回的是第一个老的版本(1,1,’a’)。
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEO-JNyeH7ciT4fPpx%2Fimage.png?alt=media&token=7584f908-9a3e-47ec-becb-d154ef98f84f)
+![image-20200726110534897](./PIC/mvcc-1.png)
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEOFKGQOtcBx2hMYpx%2Fimage.png?alt=media&token=986ac1bf-dfb3-4e0e-a004-321d6dae91bd)
+在聚簇索引中，最新的版本记录为 r3: (1, 1, 'c', 5, roll_ptr)，其中5为事务id，数据就在page中；上一个版本为r2(1, 1, 'b', 3,roll_ptr)，可通过r3的roll_ptr字段指向的undo log构造出来。而最老的版本为r1(1,1,'a', 1, roll_ptr), 可通过r2的roll_ptr字段指向的undo log构造出来。‌
 
+在辅助索引中，最新的版本记录为sr3: ('c',1)，数据就在当前二级索引page中；上一个版本为sr2: ('b',1)，数据也在当前二级索引page中，但打上了delete mark标记；而最老的版本为sr1('a',1)，数据也在当前二级索引page中，但同样打上了delete mark标记。如下图：
 
-
-在聚簇索引中，最新的版本记录为T3(1,5,roll_ptr,1,'c')其中5为事务id，数据就在page中；上一个版本为T2(1,3,roll_ptr,1,'b'), 可通过T3(1,5,roll_ptr,1,'c')上roll_ptr指向的undo记录构造出来；而最老的版本为T1(1,1,roll_ptr,1,'a'), 可通过T2(1,3,roll_ptr,1,'b')上roll_ptr指向的undo记录构造出来。
-
-‌
-
-在辅助索引中，最新的版本记录为T3('c',1)，数据就在当前二级索引page中；上一个版本为T2('b',1)，数据也在当前二级索引page中，但打上了delete mark标记；而最老的版本为T1('a',1),数据也在当前二级索引page中，但同样打上了delete mark标记。如下图：
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEOQUC-FBFr2N9Wqff%2Fimage.png?alt=media&token=64e046db-b427-4188-bb27-bda2817e0ef0)
-
-
+![image-20200726111743070](./PIC/mvcc-2.png)
 
 ‌以上节为例，默认隔离级别为RepeatableRead，select * from t1， 查询结果为老版本(1,1,’a)。其对应的ReadView为：
 
 ```
 ReadView
-m_ids: (null)
+m_ids: ()
 m_up_limit_id: 2
 m_low_limit_id: 2
 ```
 
 ‌首先查询到最新的记录(1,1,’c’)， 其事务id为5， 大于m_low_limit_id（2）所以不可见； 然后通过roll_ptr构建上一个版本(1,1,’b’), 其事务id为3，大于m_low_limit_id（2）仍然不可见；再通过rool_ptr构建出(1,1,’a’)，其事务id为1， 小于m_up_limit_id（2），可见；所以最后返回(1,1,’a’)。
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEOaqwL5R21xuYXX4v%2Fimage.png?alt=media&token=ed82b75a-2d60-4cd8-a120-f3a56967b4ed)
-
-
 
 ‌**辅助索引实现一致性读**
 
@@ -227,9 +230,17 @@ m_low_limit_id: 2
 
 ‌判断辅助索引记录可见性时，首先用此page的最大事务id比较，如果它小于当前view的m_up_limit_id则认为此记录可见，否则需要从聚簇索引中读取记录来判断可见性，参考*lock_sec_rec_cons_read_sees*。
 
-‌例如下图中select * from t1 force index(i_c3) where c3 >= ‘a’，查询结果为（1，1，’a’)。我们强制使用二级索引i_c3，查询会先从二级索引读取符合条件(c3>=’a’)的记录再回cluster index获取完整记录。
+| session 1                                          | session 2                             | 备注             |
+| -------------------------------------------------- | ------------------------------------- | ---------------- |
+|                                                    | insert into t1values (1, 1, 'a')      | TX1: id = 1      |
+| begin                                              |                                       |                  |
+| select * from t1                                   |                                       | 结果 (1, 1, 'a') |
+|                                                    | update t1 set c3 = 'b' where c3 = 'a' | TX1: id = 3      |
+| select * from t1                                   |                                       | 结果 (1, 1, 'a') |
+|                                                    | update t1 set c3 = 'c' where c3 = 'b' | TX1: id = 5      |
+| select * from t1 force index(i_c3) where c3 >= 'a' |                                       | 结果 (1, 1, 'a') |
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEOqOfUyI5MosKBH31%2Fimage.png?alt=media&token=8630fb5c-f0f4-4a0c-abf3-b1f28c0f1772)
+‌例如下图中select * from t1 force index(i_c3) where c3 >= ‘a’，查询结果为（1，1，’a’)。我们强制使用二级索引i_c3，查询会先从二级索引读取符合条件(c3>=’a’)的记录再回cluster index获取完整记录。
 
 其对应的ReadView为：
 
@@ -240,31 +251,23 @@ m_up_limit_id: 2
 m_low_limit_id: 2
 ```
 
-‌假设二级索引所在page的最大事务id为5，当前view->m_up_limit_id为5， 先读取记录(‘a’，1), 事务id为5（5 = view->m_up_limit_id)不可见，需要回cluster index查找，根据上节依次回溯到可见版本(1,1,’a)。
+‌假设二级索引所在页面的最大事务id为5，当前view->m_up_limit_id为2， 先读取记录(‘a’，1), 不可见，需要回cluster index查找，根据上节依次回溯到可见版本(1,1,’a)，‌并且判断二级索引列值和聚集索引列值一致(*row_sel_sec_rec_is_for_clust_rec*)，因此可以返回记录(1,1,’a’);
 
-‌并且判断二级索引列值和聚集索引列值一致(*row_sel_sec_rec_is_for_clust_rec*)，因此可以返回记录(1,1,’a’);
+‌接着读取记录(‘b’,1)，事务对记录不可见，需要回cluster index查找，依然回溯到可见版本(1,1,’a’)，但此时二级索引列值和聚集索引列值（’a’!=’b’)不一致, 因此（’b’,1)不符合条件。
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEN6M6qk_my2IaBmLh%2F-MCEP-lFLHFOWA7NYnMe%2Fimage.png?alt=media&token=ba5d8300-42b0-49ea-91dc-5bd5bcb3d56e)
-
-
-
-‌接着读取记录(‘b’,1)，事务id为5不可见（5 = view->m_up_limit_id)，需要回cluster index查找，依然回溯到可见版本(1,1,’a’)，但此时二级索引列值和聚集索引列值（’a’!=’b’)不一致, 因此（’b’,1)不符合条件。
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEPDXjtNlcMACw74sd%2Fimage.png?alt=media&token=ce011152-c04e-4f3f-8b18-60d6f7fbb413)
-
-
-
-‌再读取记录(‘c’,1)，事务id为5不可见（5 = view->m_up_limit_id)，需要回cluster index查找，依然回溯到可见版本(1,1,’a’)，但此时二级索引列值和聚集索引列值（’a’!=’c’)也不一致, 因此（’c’,1)也不符合条件。
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEPRJdNt17qX0irfj7%2Fimage.png?alt=media&token=c3fcf872-2b69-4801-b177-c0906b2f3eb2)
-
-
+‌再读取记录(‘c’,1)，事务对记录不可见，需要回cluster index查找，依然回溯到可见版本(1,1,’a’)，但此时二级索引列值和聚集索引列值（’a’!=’c’)也不一致, 因此（’c’,1)也不符合条件。
 
 ‌因此最终返回符合条件的记录为(1,1,’a’)。
 
 ‌我们再看下面这个例子，select * from t1 force index(i_c3) where c3 >= ‘a’，查询结果为（1，1，’c’)。
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEPdE6DxpxNDlpih3b%2Fimage.png?alt=media&token=cac594b0-e1d2-4f34-8eb0-134f47d4a23b)
+| session 1                                          | session 2                             | 备注             |
+| -------------------------------------------------- | ------------------------------------- | ---------------- |
+|                                                    | insert into t1values (1, 1, 'a')      | TX1: id = 1      |
+|                                                    | update t1 set c3 = 'b' where c3 = 'a' | TX2: id = 3      |
+|                                                    | update t1 set c3 = 'c' where c3 = 'b' | TX3: id = 5      |
+| begin                                              |                                       |                  |
+| select * from t1 force index(i_c3) where c3 >= 'a' |                                       | 结果 (1, 1, 'c') |
 
 其对应的ReadView为：
 
@@ -275,20 +278,10 @@ m_up_limit_id: 6
 m_low_limit_id: 6
 ```
 
-‌先读取记录(‘a’，1), page事务id为5可见， 再判断（‘a’,1)为del mark记录，不符合条件；
+‌先读取记录(‘a’，1)，二级索引页面最大事务id为5，可见， 再判断（‘a’,1)为del mark记录，不符合条件；
 
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEPnIwCHk8ZgRwdOzS%2Fimage.png?alt=media&token=d530bd6e-3485-4b13-a3a4-08f7197bf5d6)
+然后读取记录(‘b’，1)，二级索引页面最大事务id为5，可见， 再判断（‘b’,1)为del mark记录，不符合条件；
 
-然后读取记录(‘b’，1), page事务id为5可见， 再判断（‘b’,1)为del mark记录，不符合条件；
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEPz9NmTdC10xFWJk9%2Fimage.png?alt=media&token=d2e5148f-31ef-4ff8-b4f7-194630efed8c)
-
-
-
-再读取记录(‘c’，1), page事务id为5可见， 且（’c’,1)为非del mark记录，符合条件。
-
-![img](https://gblobscdn.gitbook.com/assets%2F-LeuGf4juyuq9zjuATOD%2F-MCEP3A2H885N7BWolKT%2F-MCEQBH9M0jhYoH5FJGQ%2Fimage.png?alt=media&token=d36683e2-35cb-4dcd-91af-1f6e52dffce1)
-
-
+再读取记录(‘c’，1), 二级索引页面最大事务id为5，可见， 且（’c’,1)为非del mark记录，符合条件。
 
 因此最终回表返回符合条件的记录为(1,1,’c’)。
