@@ -24,13 +24,13 @@ page则是表空间数据存储的基本单位，innodb将表文件（xxx.ibd）
 
 如下图，表空间的前三个page为主要的元信息page。
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_1.jpg)
+![img](PIC/table_space_1.jpg)
 
 **FSP HEADER PAGE**
 
 FSP header page是表空间的root page，存储表空间关键元数据信息。由page file header、fsp header、xdes entries三大部分构成。完整格式如下图：
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_2.jpg)
+![img](PIC/table_space_2.jpg)
 
 root page也存在38字节头部信息。其中几个关键字段：
 
@@ -53,11 +53,11 @@ fsp header主要存储表空间元信息，维护关键结构分配链表，主�
 
 第三部分是描述extent的xdes（extent descriptor）信息，每个xdes page中均存储256个xdes，描述接下来连续的256个extent（16384个page）。
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_3.jpg)
+![img](PIC/table_space_3.jpg)
 
 每个XDES项占据40字节，一个xdes page可跟踪其后的256个extent的分配情况，XDES结构如下：
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_4.jpg)
+![img](PIC/table_space_4.jpg)
 
 由于单个xdes page只能描述256个extent，因此，每隔256个extent（16384个page）便需要一个xdes page。
 
@@ -71,17 +71,17 @@ fsp header主要存储表空间元信息，维护关键结构分配链表，主�
 
 inode page由page header和inode entry组成，page header为38字节。inode entry为192字节。
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_5.jpg)
+![img](PIC/table_space_5.jpg)
 
 Inode Entry的结构如下表：
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_6.jpg)
+![img](PIC/table_space_6.jpg)
 
 inode entry中最关键的也是各种extent链表（什么是extent链表？应该是代表extent的xdes构成的链表吧）。优先从空闲extent链表中分配page，当无可用extent时，会向表空间中申请若干可用extent加入自身的空闲extent链表。另外，每个segment还有若干（32）碎片page，当segment初始扩容时，首先分配这些碎片page，直到分配完毕才会进入extent分配。
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_7.jpg)
+![img](PIC/table_space_7.jpg)
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_8.jpg)
+![img](PIC/table_space_8.jpg)
 
 ### **关键流程**
 
@@ -469,7 +469,7 @@ xdes_t *xdes_get_descriptor_with_space_hdr(...)
 
 这个函数是根据extent的起始page no来计算其xdes所在的page以及page内偏移。从前文的描述中我们知道，每个extent对应了一个描述它的xdes，且xdes存储在XDES_PAGE之中（当然 root page中也会存储xdes），每个XDES_PAGE内可存储256个xdes结构，用来描述其后连续256个extent(1M)的情况，因此，一旦我们知道了某个extent的起始page no，便可以反推出其对应的xdes所在的page，*xdes_calc_descriptor_page*函数我们会在后面仔细描述。如下：
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_9.jpg)
+![img](PIC/table_space_9.jpg)
 
 
 
@@ -523,7 +523,7 @@ constexpr ulint FLST_NODE_SIZE = 2 * FIL_ADDR_SIZE;
 
 磁盘空间链表的结构如下所示：
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_10.jpg)
+![img](PIC/table_space_10.jpg)
 
 Innodb 表空间的fsp header page中定义了多种链表，这在前面已经作过描述，不再赘述。这些链表在fsp header_init时被初始化，初始时链表为空：
 
@@ -558,11 +558,11 @@ buf_block_t *fseg_create_general(...)
 
 每个要连接在该链表上的对象中均需要预留12个字节来记录前后节点位置。例如，xdes和inode page中均有该12字节的预留。
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_11.jpg)
+![img](PIC/table_space_11.jpg)
 
 
 
-![img](/Users/dingkai/Documents/work/github/tracymacding/books/mysql-internals/innodb/STORAGE/PIC/table_space_12.jpg)
+![img](PIC/table_space_12.jpg)
 
 **xdes_calc_descriptor_page**
 
