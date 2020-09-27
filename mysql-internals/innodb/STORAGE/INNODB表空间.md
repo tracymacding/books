@@ -77,7 +77,7 @@ Inode Entry的结构如下表：
 
 ![img](PIC/table_space_6.jpg)
 
-inode entry中最关键的也是各种extent链表（什么是extent链表？应该是代表extent的xdes构成的链表吧）。优先从空闲extent链表中分配page，当无可用extent时，会向表空间中申请若干可用extent加入自身的空闲extent链表。另外，每个segment还有若干（32）碎片page，当segment初始扩容时，首先分配这些碎片page，直到分配完毕才会进入extent分配。
+inode entry中最关键的也是各种extent链表（xdes构成的链表）。优先从空闲extent链表中分配page，当无可用extent时，会向表空间中申请若干可用extent加入自身的空闲extent链表。另外，每个segment还有若干（32）碎片page，当segment初始扩容时，首先分配这些碎片page，直到分配完毕才会进入extent分配。
 
 ![img](PIC/table_space_7.jpg)
 
@@ -406,7 +406,6 @@ ulint fsp_try_extend_data_file(fil_space_t *space,
     // 首先将其extent至extent_size(典型是1MB)
     page_no_t extent_pages = fsp_get_extent_size_in_pages(page_size);
     if (size < extent_pages) {
-      /* Let us first extend the file to extent_size */
       if (!fsp_try_extend_data_file_with_pages(space, extent_pages - 1, header,
                                                mtr)) {
       }
@@ -449,7 +448,6 @@ xdes_t *xdes_get_descriptor_with_space_hdr(...)
   buf_block_t *block;
 
   if (descr_page_no == 0) {
-    /* It is on the space header page */
     descr_page = page_align(sp_header);
     block = NULL;
   } else {
@@ -573,8 +571,7 @@ buf_block_t *fseg_create_general(...)
 // 如果16384 =< n < 32768,计算的结果是16384
 // 如果32768 =< n < 49152,计算的结果是32768
 // 以此类推
-#define ut_2pow_round(n, m) ((n) & ~((m)-1))
-
+ 	
 page_no_t
 xdes_calc_descriptor_page(const page_size_t &page_size, page_no_t offset) 
 {

@@ -15,9 +15,43 @@ XDES用于描述EXTENT状态，每个XDES占据40个字节，包含如下字段�
 >
 > * node: 其所在的链表的连接件，包含prev和next。可能位于FSP_FREE/FSP_FREE_FRAG/FSP_FULL_FRAG某个链表上，链表项的内容是XDES所在的page_no以及page内的offset，总共占据12字节
 >
-> * state：该extent状态，可能为XDES_FREE / XDES_FREE_FRAG /XDES_FULL_FRAG / XDES_FSEG，占据4个字节
+> * state：该extent状态，可能为XDES_FREE / XDES_FREE_FRAG /XDES_FULL_FRAG / XDES_FSEG/XDES_FSEG_FRAG，占据4个字节
 >
 > * bitmap：位图表示xdes描述的page的状况。每个page使用2个bit，位0表示page是否分配，位1表示page是否干净(不过目前没有使用)，因而64个page总共需要16字节来描述
+
+#### EXTENT可能被加入哪些链表
+
+EXTENT可能被加入到以下链表：
+
+> FSP_FREE:
+>
+> FSP_FREE_FRAG:
+>
+> FSP_FULL:
+>
+> FSP_FULL_FRAG:
+>
+> FSEG_FREE: segment上所有page均空闲的extent构成的链表
+>
+> FSEG_NOT_FULL: 至少有一个page被分配使用的extent构成的链表，当该extent所有page均已分配，其会被转移至FSEG_FULL链表，当所有page已释放，其会被转移至FSEG_FREE链表
+>
+> FSEG_FULL: segment上所有page均已使用的extent构成的链表
+
+extent被创建时（其实是其对应的xdes被初始化）都是位于FSP_FREE或者FSP_FREE_FRAG链表上，这取决于它是否包含xdes page。在系统运行时，当segment上没有可用extent时，会从表空间的这两个链表选择其一：优先从FSP_FREE_FRAG链表上获取，如果失败，再从FSP_FREE链表上分配，然后将分配得到的extent从原链表中摘除并插入至segment的FSEG_NOT_FULL或者FSEG_FREE链表。
+
+#### EXTENT可能的状态
+
+EXTENT可能处于以下几个状态：
+
+> **XDES_FREE**：extent内不包含xdes page且其对应的xdes已经初始化，它会被插入FSP_FREE链表
+>
+> **XDES_FREE_FRAG**：extent内包含xdes page且其对应的xdes已经初始化，它会被插入FSP_FREE_FRAG链表
+>
+> **XDES_FULL_FRAG**：extent内包含xdes page且其所有page已经被分配使用，它会被插入FSP_FREE_FRAG链表
+>
+> **XDES_FSEG**: extent内不包含xdes page且已经被分配给某个特定的segment，它会被插入FSEG_FREE链表
+>
+> **XDES_FSEG_FRAG**：extent内包含xdes page且已经被分配给某个特定的segment，它会被插入FSEG_FREE_NOT_FULL链表
 
 #### XDES PAGE
 
@@ -132,7 +166,7 @@ static void fsp_fill_free_list(bool init_space, fil_space_t *space,
 
 *fsp_fill_free_list*有两个调用时机：
 
-1. 创建表空间调用fsp_header_init中调用以将第一个extent（起始64个page对应的xdes初始化并将其加入至fsp_free_frag链表上）
+1. 创建表空间调用fsp_header_init中调用以将第一个extent（起始64个page对应的xdes）初始化并将其加入至fsp_free_frag链表上
 2. 创建extent时（fsp_alloc_free_extent），如果fsp_free链表为空，那此时需要从底层创建一个extent并初始化其对应的xdes。
 
 用自己写的工具分析了下刚刚创建的空表的fsp header page的详细信息，如下：
@@ -172,4 +206,46 @@ static void fsp_fill_free_list(bool init_space, fil_space_t *space,
 可以发现，初始化时该表空间总共有7个page，其中使用了5个page。第一个extent被加入至fsp_free_frag链表上，且描述该extent的xdes位于page 0的158字节处。由于初始化时只init了一个xdes，因而fsp_free_limit为64，接下来系统运行过程中如果再分配extent，会继续提升该值。但需要说明的是，这里并不代表文件大小已经达到了该值，这两者之间没有必然的联系。
 
 这些都与我们上面分析的*fsp_fill_free_list*逻辑吻合。
+
+#### 为Segment分配空闲EXTENT
+
+```c++
+static xdes_t *fseg_alloc_free_extent(fseg_inode_t *inode, space_id_t space,
+                                      const page_size_t &page_size,
+                                      mtr_t *mtr)
+{
+  // 如果segment的FSEG_FREE链表不为空
+  // 那么直接从该链表分配即可
+  if (flst_get_len(inode + FSEG_FREE) > 0) {
+    first = flst_get_first(inode + FSEG_FREE, mtr);
+    descr = xdes_lst_get_descriptor(space, page_size, first, mtr);
+  } else {
+    // 如果表空间header的FSEG_FREE链表不为空
+    // 首先尝试从FSP的free_frag链表中分配一个frag extent
+    descr = fsp_alloc_xdes_free_frag(space, inode, page_size, mtr);
+    if (descr != nullptr) {
+      return (descr);
+    }
+
+    // 如果还是分配不出来,这里就要从FSP中分配了
+    // 这里会尝试从fsp_free链表中分配,如果该链表为空
+    // 就要调用上面描述的fsp_fill_free_list函数创建新的extent了
+    descr = fsp_alloc_free_extent(space, page_size, 0, mtr);
+
+    if (descr == nullptr) {
+      return (nullptr);
+    }
+
+    seg_id = mach_read_from_8(inode + FSEG_ID);
+		// 将新分配的extent插入至segment的FSEG_FREE链表上
+    xdes_set_segment_id(descr, seg_id, XDES_FSEG, mtr);
+    flst_add_last(inode + FSEG_FREE, descr + XDES_FLST_NODE, mtr);
+
+    fseg_fill_free_list(inode, space, page_size,
+                        xdes_get_offset(descr) + FSP_EXTENT_SIZE, mtr);
+  }
+
+  return (descr);
+}
+```
 
